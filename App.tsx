@@ -1,4 +1,6 @@
 import React, { useState, useCallback } from 'react';
+import { contratoService } from './services/contratoService';
+import { Loader2 } from 'lucide-react';
 import { 
   Building2, 
   Plus, 
@@ -10,7 +12,9 @@ import {
   ClipboardList,
   ChevronDown,
   ChevronUp,
-  Car
+  Car,
+  Database,
+  AlertCircle
 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { Input } from './components/ui/Input';
@@ -32,7 +36,6 @@ const initialVehicle: VehicleData = {
   quilometragem: '',
   tipoOperacao: '',
   kmMensal: '',
-  // New per-vehicle contract fields
   duracaoMeses: '',
   quilometragemTotal: '',
   dataInicio: '',
@@ -64,16 +67,19 @@ const App: React.FC = () => {
   const [showSuccess, setShowSuccess] = useState(false);
   const [isSummaryOpen, setIsSummaryOpen] = useState(false);
   
+  // NEW: Supabase State
+  const [isSavingCM, setIsSavingCM] = useState(false);
+  const [isSavingAPV, setIsSavingAPV] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  
   // Confirmation Dialog State
   const [vehicleToDelete, setVehicleToDelete] = useState<string | null>(null);
 
   // --- Validation Logic ---
 
   const validateField = (name: string, value: string): string => {
-    // Helper regex
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     
-    // Client Field Rules
     if (['nomeEmpresa', 'nif', 'morada', 'responsavelNome', 'responsavelCargo', 'responsavelTelefone', 'provincia'].includes(name)) {
       if (!value.trim()) return 'Este campo é obrigatório';
     }
@@ -87,7 +93,6 @@ const App: React.FC = () => {
   };
 
   const validateVehicleField = (field: keyof VehicleData, value: string): string => {
-    // Technical Specs Validation
     if (field === 'vin') {
       if (!value.trim()) return 'VIN é obrigatório';
       if (value.length !== 17) return `O VIN deve ter 17 caracteres (Atual: ${value.length})`;
@@ -98,7 +103,6 @@ const App: React.FC = () => {
       return 'Este campo é obrigatório';
     }
 
-    // Contract Specs Validation (Per Vehicle)
     if (field === 'duracaoMeses') {
       if (!value.trim()) return 'Este campo é obrigatório';
     }
@@ -109,7 +113,6 @@ const App: React.FC = () => {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       
-      // Parse YYYY-MM-DD to local date
       const [year, month, day] = value.split('-').map(Number);
       const selectedDate = new Date(year, month - 1, day);
       
@@ -123,7 +126,6 @@ const App: React.FC = () => {
 
   // --- Handlers ---
 
-  // Generic Field Blur Handler for Client
   const handleBlur = (section: 'client') => (e: React.FocusEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
     const error = validateField(name, value);
@@ -139,7 +141,6 @@ const App: React.FC = () => {
     });
   };
 
-  // Generic Change Handler for Client
   const handleChange = (section: 'client') => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
     
@@ -151,7 +152,6 @@ const App: React.FC = () => {
       return newData;
     });
 
-    // "Eager" Validation
     if (errors[name]) {
       const error = validateField(name, value);
       if (!error) {
@@ -164,7 +164,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Vehicle Handlers
   const addVehicle = () => {
     const newId = uuidv4();
     setFormData(prev => ({
@@ -210,13 +209,10 @@ const App: React.FC = () => {
       ...prev,
       vehicles: prev.vehicles.map(v => {
         if (v.id === id) {
-          // Logic 1: Reset Model if Make changes
           if (field === 'marca') {
             return { ...v, [field]: value, modelo: '' };
           }
 
-          // Logic 2: Auto-calculate Total Mileage based on Duration
-          // Standard: 80,000 km per year
           if (field === 'duracaoMeses') {
              const months = parseInt(value);
              let calculatedKm = '';
@@ -267,13 +263,11 @@ const App: React.FC = () => {
     });
   };
 
-  // Full Form Validation on Submit
   const validateAll = (): boolean => {
     const newErrors: Record<string, string> = {};
     let isValid = true;
     let firstErrorVehicleId: string | null = null;
 
-    // Client
     Object.keys(formData.client).forEach(key => {
       const error = validateField(key, (formData.client as any)[key]);
       if (error) {
@@ -282,11 +276,10 @@ const App: React.FC = () => {
       }
     });
 
-    // Vehicles (Tech + Contract)
     formData.vehicles.forEach((v, index) => {
       Object.keys(v).forEach(key => {
         if (key === 'id') return;
-        if (key === 'observacoes') return; // Optional
+        if (key === 'observacoes') return;
         
         const error = validateVehicleField(key as keyof VehicleData, (v as any)[key]);
         if (error) {
@@ -325,6 +318,58 @@ const App: React.FC = () => {
     }
   }, [formData]);
 
+  // NEW: Save to Supabase handlers
+  const handleSaveContrato = async (tipo: 'CM' | 'APV') => {
+    // Validate first
+    if (!validateAll()) {
+      setSaveMessage({ type: 'error', text: 'Por favor corrija os erros no formulário antes de salvar.' });
+      setTimeout(() => setSaveMessage(null), 5000);
+      return;
+    }
+
+    const setLoading = tipo === 'CM' ? setIsSavingCM : setIsSavingAPV;
+    
+    setLoading(true);
+    setSaveMessage(null);
+
+    try {
+      const result = await contratoService.criarContratoCompleto(formData, tipo);
+      
+      if (result.success) {
+        setSaveMessage({ 
+          type: 'success', 
+          text: `${result.message} (ID: ${result.numero_contrato})` 
+        });
+        
+        // Reset form after 3 seconds
+        setTimeout(() => {
+          const newId = uuidv4();
+          setFormData({
+            client: initialClient,
+            vehicles: [{ ...initialVehicle, id: newId }],
+          });
+          setExpandedVehicleId(newId);
+          setErrors({});
+          setSaveMessage(null);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }, 3000);
+      } else {
+        setSaveMessage({ 
+          type: 'error', 
+          text: `Erro ao criar contrato: ${result.error}` 
+        });
+      }
+    } catch (error: any) {
+      setSaveMessage({ 
+        type: 'error', 
+        text: `Erro inesperado: ${error.message}` 
+      });
+    } finally {
+      setLoading(false);
+      setTimeout(() => setSaveMessage(null), 8000);
+    }
+  };
+
   const resetForm = () => {
     if (window.confirm('Tem a certeza que deseja limpar todo o formulário?')) {
       const newId = uuidv4();
@@ -335,18 +380,17 @@ const App: React.FC = () => {
       setExpandedVehicleId(newId);
       setErrors({});
       setShowSuccess(false);
+      setSaveMessage(null);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 
-  // Derived state for summary
   const totalVehicles = formData.vehicles.length;
   const summaryTitle = `Resumo do Contrato: ${formData.client.nomeEmpresa || 'Nova Empresa'}`;
 
   return (
     <div className="min-h-screen pb-20 font-sans text-slate-800 bg-slate-50">
       
-      {/* Confirmation Dialog */}
       <ConfirmDialog 
         isOpen={!!vehicleToDelete}
         title="Remover Viatura?"
@@ -409,6 +453,27 @@ const App: React.FC = () => {
             <div>
               <h4 className="font-bold">Sucesso!</h4>
               <p className="text-sm text-emerald-700 mt-1">Dados validados com sucesso. O download do seu ficheiro começará em breve.</p>
+            </div>
+          </div>
+        )}
+
+        {/* NEW: SAVE MESSAGE */}
+        {saveMessage && (
+          <div className={`border rounded-2xl p-6 flex items-center gap-4 shadow-md animate-in slide-in-from-top-4 fade-in duration-500 ${
+            saveMessage.type === 'success' 
+              ? 'bg-emerald-50 border-emerald-100 text-emerald-900' 
+              : 'bg-red-50 border-red-100 text-red-900'
+          }`}>
+            <div className={`p-2 rounded-full ${
+              saveMessage.type === 'success' 
+                ? 'bg-emerald-100 text-emerald-600' 
+                : 'bg-red-100 text-red-600'
+            }`}>
+              {saveMessage.type === 'success' ? <CheckCircle2 size={24} /> : <AlertCircle size={24} />}
+            </div>
+            <div>
+              <h4 className="font-bold">{saveMessage.type === 'success' ? 'Contrato Salvo!' : 'Erro'}</h4>
+              <p className="text-sm mt-1">{saveMessage.text}</p>
             </div>
           </div>
         )}
@@ -525,7 +590,7 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          {/* SECTION 2: VEHICLES (Now includes contract info) */}
+          {/* SECTION 2: VEHICLES */}
           <section>
             <div className="flex items-end justify-between mb-6 px-2">
               <div>
@@ -637,35 +702,63 @@ const App: React.FC = () => {
                   </table>
                 </div>
                 <div className="p-4 bg-slate-800/50 text-center text-xs text-slate-500 border-t border-slate-800">
-                   Revise os dados acima antes de exportar o ficheiro.
+                   Revise os dados acima antes de exportar ou salvar na base de dados.
                 </div>
               </div>
             )}
           </section>
 
-          {/* ACTIONS */}
+          {/* ACTIONS - MODIFIED */}
           <div className="sticky bottom-0 bg-white/80 backdrop-blur-lg border-t border-slate-200 p-6 -mx-6 md:mx-0 md:rounded-2xl md:static md:bg-transparent md:border-0 md:p-0">
-             <div className="flex flex-col-reverse md:flex-row gap-4">
-              <Button 
-                type="button" 
-                variant="secondary" 
-                onClick={resetForm}
-                icon={<RotateCcw size={18} />}
-                className="w-full md:w-auto text-slate-600 hover:text-slate-900"
-              >
-                Limpar Formulário
-              </Button>
-              <div className="flex-1"></div>
-              <Button 
-                type="button" 
-                variant="success" 
-                onClick={handleExport}
-                isLoading={isExporting}
-                icon={<Download size={20} />}
-                className="w-full md:w-auto min-w-[280px] text-lg py-4 shadow-xl shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all transform hover:-translate-y-1"
-              >
-                Exportar Excel (.xlsx)
-              </Button>
+             <div className="flex flex-col gap-4">
+              
+              {/* Row 1: Supabase Buttons */}
+              <div className="flex flex-col md:flex-row gap-4">
+                <Button 
+                  type="button" 
+                  onClick={() => handleSaveContrato('CM')}
+                  disabled={isSavingCM || isSavingAPV}
+                  isLoading={isSavingCM}
+                  icon={<Database size={20} />}
+                  className="w-full md:flex-1 bg-blue-600 hover:bg-blue-700 text-white py-4 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 transition-all"
+                >
+                  Salvar Contrato CM
+                </Button>
+                <Button 
+                  type="button" 
+                  onClick={() => handleSaveContrato('APV')}
+                  disabled={isSavingCM || isSavingAPV}
+                  isLoading={isSavingAPV}
+                  icon={<Database size={20} />}
+                  className="w-full md:flex-1 bg-purple-600 hover:bg-purple-700 text-white py-4 shadow-lg shadow-purple-500/20 hover:shadow-purple-500/30 transition-all"
+                >
+                  Salvar Contrato APV
+                </Button>
+              </div>
+
+              {/* Row 2: Original Buttons */}
+              <div className="flex flex-col-reverse md:flex-row gap-4">
+                <Button 
+                  type="button" 
+                  variant="secondary" 
+                  onClick={resetForm}
+                  icon={<RotateCcw size={18} />}
+                  className="w-full md:w-auto text-slate-600 hover:text-slate-900"
+                >
+                  Limpar Formulário
+                </Button>
+                <div className="flex-1"></div>
+                <Button 
+                  type="button" 
+                  variant="success" 
+                  onClick={handleExport}
+                  isLoading={isExporting}
+                  icon={<Download size={20} />}
+                  className="w-full md:w-auto min-w-[280px] text-lg py-4 shadow-xl shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all transform hover:-translate-y-1"
+                >
+                  Exportar Excel (.xlsx)
+                </Button>
+              </div>
             </div>
           </div>
           
